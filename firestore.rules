@@ -1,0 +1,57 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+
+    function isValidUserSettings(data) {
+      return hasRequiredFields(['weight', 'dailyGoal']) &&
+             data.weight is number && data.weight > 0 && data.weight < 500 &&
+             data.dailyGoal is number && data.dailyGoal > 0 && data.dailyGoal < 20000;
+    }
+
+    function isValidWaterLog(data) {
+      return hasRequiredFields(['amount', 'timestamp', 'date']) &&
+             data.amount is number && data.amount > 0 && data.amount < 5000 &&
+             data.timestamp is string &&
+             data.date is string && data.date.matches("^\\d{4}-\\d{2}-\\d{2}$");
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read: if isOwner(userId);
+      allow create, update: if isOwner(userId) && isValidUserSettings(request.resource.data);
+
+      match /logs/{logId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidWaterLog(request.resource.data);
+        allow delete: if isOwner(userId);
+      }
+    }
+  }
+}

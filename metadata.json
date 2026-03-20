@@ -1,0 +1,5 @@
+{
+  "name": "H2LS",
+  "description": "App de controle de hidratação inteligente com cálculo de meta por peso e histórico diário.",
+  "requestFramePermissions": []
+}
