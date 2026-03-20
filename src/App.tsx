@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { 
   onAuthStateChanged, 
-  signInAnonymously,
+  signInWithPopup,
+  GoogleAuthProvider,
   User 
 } from 'firebase/auth';
 import { 
@@ -14,7 +15,8 @@ import {
   addDoc,
   deleteDoc,
   getDoc,
-  writeBatch
+  writeBatch,
+  getDocFromServer
 } from 'firebase/firestore';
 import { auth, db } from './firebase';
 import { 
@@ -166,6 +168,58 @@ const ErrorBoundary = ({ children }: { children: React.ReactNode }) => {
   return <>{children}</>;
 };
 
+// --- Firestore Error Handling ---
+enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId?: string;
+    email?: string;
+    emailVerified?: boolean;
+    isAnonymous?: boolean;
+    tenantId?: string | null;
+    providerInfo: {
+      providerId: string;
+      displayName: string | null;
+      email: string | null;
+      photoUrl: string | null;
+    }[];
+  }
+}
+
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email || undefined,
+      emailVerified: auth.currentUser?.emailVerified,
+      isAnonymous: auth.currentUser?.isAnonymous,
+      tenantId: auth.currentUser?.tenantId,
+      providerInfo: auth.currentUser?.providerData.map(provider => ({
+        providerId: provider.providerId,
+        displayName: provider.displayName,
+        email: provider.email,
+        photoUrl: provider.photoURL
+      })) || []
+    },
+    operationType,
+    path
+  }
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
+}
+
 // --- Main App ---
 
 export default function App() {
@@ -178,22 +232,39 @@ export default function App() {
   const [showCustomInput, setShowCustomInput] = useState(false);
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
 
-  // Auth & Anonymous Login
+  // Auth & Login
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
-      if (!currentUser) {
-        try {
-          await signInAnonymously(auth);
-        } catch (err) {
-          console.error("Auth error:", err);
-        }
-      } else {
-        setUser(currentUser);
-        setIsAuthReady(true);
-      }
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      setIsAuthReady(true);
     });
     return unsubscribe;
   }, []);
+
+  const login = async () => {
+    const provider = new GoogleAuthProvider();
+    try {
+      await signInWithPopup(auth, provider);
+    } catch (err) {
+      console.error("Login error:", err);
+    }
+  };
+
+  // Connection Test
+  useEffect(() => {
+    if (!isAuthReady || !user) return;
+    
+    const testConnection = async () => {
+      try {
+        await getDocFromServer(doc(db, 'test', 'connection'));
+      } catch (error) {
+        if (error instanceof Error && error.message.includes('the client is offline')) {
+          console.error("Please check your Firebase configuration. The client is offline.");
+        }
+      }
+    };
+    testConnection();
+  }, [isAuthReady, user]);
 
   // Data Sync & Migration
   useEffect(() => {
@@ -205,25 +276,29 @@ export default function App() {
       const localLogs = localStorage.getItem('h2ls_logs');
 
       if (localSettings || localLogs) {
-        const userDoc = await getDoc(doc(db, 'users', user.uid));
-        
-        // Only migrate if Firestore is empty
-        if (!userDoc.exists()) {
-          const batch = writeBatch(db);
+        try {
+          const userDoc = await getDoc(doc(db, 'users', user.uid));
           
-          if (localSettings) {
-            batch.set(doc(db, 'users', user.uid), JSON.parse(localSettings));
+          // Only migrate if Firestore is empty
+          if (!userDoc.exists()) {
+            const batch = writeBatch(db);
+            
+            if (localSettings) {
+              batch.set(doc(db, 'users', user.uid), JSON.parse(localSettings));
+            }
+            
+            if (localLogs) {
+              const parsedLogs = JSON.parse(localLogs) as WaterLog[];
+              parsedLogs.forEach(log => {
+                const logRef = doc(collection(db, 'users', user.uid, 'logs'), log.id);
+                batch.set(logRef, log);
+              });
+            }
+            
+            await batch.commit();
           }
-          
-          if (localLogs) {
-            const parsedLogs = JSON.parse(localLogs) as WaterLog[];
-            parsedLogs.forEach(log => {
-              const logRef = doc(collection(db, 'users', user.uid, 'logs'), log.id);
-              batch.set(logRef, log);
-            });
-          }
-          
-          await batch.commit();
+        } catch (err) {
+          handleFirestoreError(err, OperationType.WRITE, `users/${user.uid}`);
         }
         
         // Clear local storage after migration attempt
@@ -240,6 +315,8 @@ export default function App() {
       } else {
         setActiveTab('settings');
       }
+    }, (err) => {
+      handleFirestoreError(err, OperationType.GET, `users/${user.uid}`);
     });
 
     const logsQuery = query(
@@ -252,6 +329,8 @@ export default function App() {
         ...doc.data()
       })) as WaterLog[];
       setLogs(newLogs);
+    }, (err) => {
+      handleFirestoreError(err, OperationType.LIST, `users/${user.uid}/logs`);
     });
 
     return () => {
@@ -278,6 +357,7 @@ export default function App() {
     if (!user) return;
     const now = new Date();
     const id = uuidv4();
+    const path = `users/${user.uid}/logs/${id}`;
     try {
       await setDoc(doc(db, 'users', user.uid, 'logs', id), {
         id,
@@ -286,21 +366,23 @@ export default function App() {
         date: format(now, 'yyyy-MM-dd')
       });
     } catch (err) {
-      console.error("Error adding water:", err);
+      handleFirestoreError(err, OperationType.WRITE, path);
     }
   };
 
   const deleteLog = async (id: string) => {
     if (!user) return;
+    const path = `users/${user.uid}/logs/${id}`;
     try {
       await deleteDoc(doc(db, 'users', user.uid, 'logs', id));
     } catch (err) {
-      console.error("Error deleting log:", err);
+      handleFirestoreError(err, OperationType.DELETE, path);
     }
   };
 
   const updateSettings = async (weight: number, level: number, manualGoal?: number, navigate = false) => {
     if (!user) return;
+    const path = `users/${user.uid}`;
     
     let goal = manualGoal;
     if (!goal) {
@@ -319,7 +401,7 @@ export default function App() {
       await setDoc(doc(db, 'users', user.uid), newSettings);
       if (navigate) setActiveTab('dashboard');
     } catch (err) {
-      console.error("Error updating settings:", err);
+      handleFirestoreError(err, OperationType.WRITE, path);
     }
   };
 
@@ -398,6 +480,36 @@ export default function App() {
           className="text-blue-500"
         >
           <Droplets size={64} />
+        </motion.div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center p-6">
+        <motion.div 
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-[2.5rem] p-10 text-center space-y-8"
+        >
+          <div className="bg-blue-500/10 w-20 h-20 rounded-3xl flex items-center justify-center mx-auto">
+            <Droplets size={40} className="text-blue-500" />
+          </div>
+          <div className="space-y-2">
+            <h1 className="text-3xl font-black text-white tracking-tighter">H2LS</h1>
+            <p className="text-slate-400 text-sm">Hidrate-se com inteligência e acompanhe seu progresso.</p>
+          </div>
+          <button 
+            onClick={login}
+            className="w-full py-4 bg-white text-slate-950 rounded-2xl font-black flex items-center justify-center gap-3 hover:bg-slate-200 transition-all"
+          >
+            <LogIn size={20} />
+            Entrar com Google
+          </button>
+          <p className="text-[10px] text-slate-600 uppercase font-bold tracking-widest">
+            Seus dados são salvos na nuvem com segurança
+          </p>
         </motion.div>
       </div>
     );
