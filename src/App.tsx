@@ -134,32 +134,73 @@ const QuickAddButton = ({ amount, onClick }: { amount: number; onClick: (val: nu
 );
 
 const ErrorBoundary = ({ children }: { children: React.ReactNode }) => {
-  const [hasError, setHasError] = useState(false);
+  const [error, setError] = useState<Error | null>(null);
 
   useEffect(() => {
-    const handleError = () => setHasError(true);
+    const handleError = (event: ErrorEvent) => setError(event.error);
+    const handleRejection = (event: PromiseRejectionEvent) => setError(event.reason);
+    
     window.addEventListener('error', handleError);
-    return () => window.removeEventListener('error', handleError);
+    window.addEventListener('unhandledrejection', handleRejection);
+    
+    return () => {
+      window.removeEventListener('error', handleError);
+      window.removeEventListener('unhandledrejection', handleRejection);
+    };
   }, []);
 
-  if (hasError) {
+  if (error) {
+    let displayMessage = "Ocorreu um erro inesperado no aplicativo.";
+    let errorDetail = "";
+
+    try {
+      const parsed = JSON.parse(error.message);
+      if (parsed.error) {
+        displayMessage = parsed.error;
+        if (displayMessage.includes('quota exceeded')) {
+          displayMessage = "Cota do banco de dados excedida. Por favor, tente novamente amanhã.";
+        } else if (displayMessage.includes('permission-denied')) {
+          displayMessage = "Permissão negada. Verifique se você está logado corretamente.";
+        }
+        errorDetail = `Operação: ${parsed.operationType} em ${parsed.path}`;
+      }
+    } catch (e) {
+      displayMessage = error.message || displayMessage;
+    }
+
     return (
       <div className="min-h-screen bg-slate-950 flex items-center justify-center p-6 text-center">
-        <div className="bg-slate-900 border border-red-500/30 p-8 rounded-3xl max-w-md">
+        <div className="bg-slate-900 border border-red-500/30 p-8 rounded-3xl max-w-md w-full">
           <AlertCircle className="w-12 h-12 text-red-500 mx-auto mb-4" />
           <h2 className="text-xl font-bold text-white mb-2">Ops! Algo deu errado</h2>
-          <p className="text-slate-400 text-sm mb-6">
-            Ocorreu um erro inesperado no aplicativo.
+          <p className="text-slate-400 text-sm mb-2">
+            {displayMessage}
           </p>
-          <button 
-            onClick={() => {
-              localStorage.clear();
-              window.location.reload();
-            }}
-            className="w-full py-3 bg-blue-600 text-white rounded-xl font-semibold"
-          >
-            Limpar Dados e Reiniciar
-          </button>
+          {errorDetail && (
+            <p className="text-slate-600 text-[10px] font-mono mb-6 break-all">
+              {errorDetail}
+            </p>
+          )}
+          <div className="space-y-3">
+            <button 
+              onClick={() => {
+                setError(null);
+                window.location.reload();
+              }}
+              className="w-full py-3 bg-blue-600 text-white rounded-xl font-semibold hover:bg-blue-500 transition-colors"
+            >
+              Tentar Novamente
+            </button>
+            <button 
+              onClick={() => {
+                localStorage.clear();
+                window.location.reload();
+              }}
+              className="w-full py-3 bg-slate-800 text-slate-400 rounded-xl font-semibold hover:bg-slate-700 transition-colors text-xs"
+            >
+              Limpar Dados e Reiniciar
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -232,6 +273,14 @@ export default function App() {
   const [showCustomInput, setShowCustomInput] = useState(false);
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
 
+  const [localWeight, setLocalWeight] = useState<string>('');
+
+  useEffect(() => {
+    if (settings?.weight) {
+      setLocalWeight(settings.weight.toString());
+    }
+  }, [settings?.weight]);
+
   // Auth & Login
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
@@ -247,6 +296,17 @@ export default function App() {
       await signInWithPopup(auth, provider);
     } catch (err) {
       console.error("Login error:", err);
+    }
+  };
+
+  const logout = async () => {
+    try {
+      await auth.signOut();
+      setSettings(null);
+      setLogs([]);
+      setActiveTab('dashboard');
+    } catch (err) {
+      console.error("Logout error:", err);
     }
   };
 
@@ -629,6 +689,32 @@ export default function App() {
                     </div>
                   </div>
                   
+                  <div className="h-32 w-full mb-4">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={[...historyData].reverse()}>
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#1e293b" />
+                        <XAxis 
+                          dataKey="displayDate" 
+                          axisLine={false} 
+                          tickLine={false} 
+                          tick={{ fill: '#64748b', fontSize: 10 }} 
+                        />
+                        <Tooltip 
+                          contentStyle={{ backgroundColor: '#0f172a', border: '1px solid #1e293b', borderRadius: '12px' }}
+                          itemStyle={{ color: '#3b82f6', fontWeight: 'bold' }}
+                          labelStyle={{ color: '#94a3b8', marginBottom: '4px' }}
+                          cursor={{ fill: 'rgba(59, 130, 246, 0.1)' }}
+                        />
+                        <Bar 
+                          dataKey="ml" 
+                          fill="#3b82f6" 
+                          radius={[4, 4, 0, 0]} 
+                          name="ml"
+                        />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                  
                   <div className="grid grid-cols-3 gap-2">
                     <div className="bg-slate-900/40 rounded-2xl p-3 border border-white/5">
                       <p className="text-[9px] text-slate-500 uppercase font-bold mb-1">Metas</p>
@@ -818,9 +904,18 @@ export default function App() {
                 exit={{ opacity: 0, y: -10 }}
                 className="space-y-6"
               >
-                <header>
-                  <h1 className="text-xl font-bold text-white">Configurações</h1>
-                  <p className="text-slate-500 text-xs">Personalize sua meta diária</p>
+                <header className="flex justify-between items-center">
+                  <div>
+                    <h1 className="text-xl font-bold text-white">Configurações</h1>
+                    <p className="text-slate-500 text-xs">Personalize sua meta diária</p>
+                  </div>
+                  <button 
+                    onClick={logout}
+                    className="p-2 bg-slate-900 border border-slate-800 rounded-xl text-slate-500 hover:text-rose-500 transition-colors"
+                    title="Sair"
+                  >
+                    <LogIn size={18} className="rotate-180" />
+                  </button>
                 </header>
 
                 <div className="space-y-5">
@@ -828,11 +923,14 @@ export default function App() {
                     <label className="block text-[10px] text-slate-500 uppercase font-bold tracking-widest mb-2.5 ml-1">Seu Peso (kg)</label>
                     <input 
                       type="number"
-                      defaultValue={settings?.weight}
+                      value={localWeight}
                       placeholder="Ex: 70"
-                      onChange={(e) => {
-                        const val = parseFloat(e.target.value);
-                        if (val > 0) updateSettings(val, settings?.hydrationLevel || 1);
+                      onChange={(e) => setLocalWeight(e.target.value)}
+                      onBlur={() => {
+                        const val = parseFloat(localWeight);
+                        if (val > 0 && val !== settings?.weight) {
+                          updateSettings(val, settings?.hydrationLevel || 1);
+                        }
                       }}
                       className="w-full bg-slate-950 border border-slate-800 rounded-2xl px-5 py-3.5 text-lg font-bold text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
                     />
@@ -846,7 +944,7 @@ export default function App() {
                       active={settings?.hydrationLevel === 1 || !settings?.hydrationLevel}
                       title="Normal"
                       description="Para quem não treina e não usa creatina."
-                      onClick={() => updateSettings(settings?.weight || 70, 1)}
+                      onClick={() => updateSettings(parseFloat(localWeight) || settings?.weight || 70, 1)}
                     />
 
                     <LevelOption 
@@ -854,7 +952,7 @@ export default function App() {
                       active={settings?.hydrationLevel === 2}
                       title="Uso de Creatina"
                       description="A creatina exige maior ingestão de líquidos."
-                      onClick={() => updateSettings(settings?.weight || 70, 2)}
+                      onClick={() => updateSettings(parseFloat(localWeight) || settings?.weight || 70, 2)}
                     />
 
                     <LevelOption 
@@ -862,7 +960,7 @@ export default function App() {
                       active={settings?.hydrationLevel === 3}
                       title="Creatina + Treino"
                       description="Indicado para quem treina intenso e usa creatina."
-                      onClick={() => updateSettings(settings?.weight || 70, 3)}
+                      onClick={() => updateSettings(parseFloat(localWeight) || settings?.weight || 70, 3)}
                     />
                   </div>
 
@@ -877,7 +975,14 @@ export default function App() {
                   </div>
 
                   <button 
-                    onClick={() => setActiveTab('dashboard')}
+                    onClick={() => {
+                      const val = parseFloat(localWeight);
+                      if (val > 0) {
+                        updateSettings(val, settings?.hydrationLevel || 1, undefined, true);
+                      } else {
+                        setActiveTab('dashboard');
+                      }
+                    }}
                     className="w-full py-4 rounded-2xl bg-blue-600 hover:bg-blue-500 text-white font-bold transition-all shadow-lg shadow-blue-900/20"
                   >
                     Confirmar e Ir para Início
