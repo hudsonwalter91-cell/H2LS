@@ -3,7 +3,8 @@ import {
   onAuthStateChanged, 
   signInWithPopup,
   GoogleAuthProvider,
-  User 
+  User,
+  signInAnonymously
 } from 'firebase/auth';
 import { 
   doc, 
@@ -265,6 +266,7 @@ function handleFirestoreError(error: unknown, operationType: OperationType, path
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
+  const [guestId, setGuestId] = useState<string | null>(null);
   const [settings, setSettings] = useState<UserSettings | null>(null);
   const [logs, setLogs] = useState<WaterLog[]>([]);
   const [activeTab, setActiveTab] = useState<'dashboard' | 'history' | 'settings'>('dashboard');
@@ -281,12 +283,45 @@ export default function App() {
     }
   }, [settings?.weight]);
 
+  const effectiveUserId = useMemo(() => {
+    return user?.uid || guestId || 'guest';
+  }, [user, guestId]);
+
   // Auth & Login
   useEffect(() => {
+    // Initialize guest ID if not present
+    let storedGuestId = localStorage.getItem('h2ls_guest_id');
+    if (!storedGuestId) {
+      storedGuestId = `guest_${uuidv4()}`;
+      localStorage.setItem('h2ls_guest_id', storedGuestId);
+    }
+    setGuestId(storedGuestId);
+
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
       setUser(currentUser);
-      setIsAuthReady(true);
+      if (currentUser) {
+        setIsAuthReady(true);
+      }
     });
+    
+    // Attempt anonymous sign in if not logged in to Google
+    const tryAnon = async () => {
+      // Small delay to let onAuthStateChanged fire first if a session exists
+      await new Promise(resolve => setTimeout(resolve, 500));
+      
+      if (!auth.currentUser) {
+        try {
+          await signInAnonymously(auth);
+        } catch (err) {
+          console.warn("Anonymous sign-in failed, using local mode:", err);
+          setIsAuthReady(true); // Fallback to local-only mode
+        }
+      } else {
+        setIsAuthReady(true);
+      }
+    };
+    tryAnon();
+
     return unsubscribe;
   }, []);
 
@@ -324,14 +359,14 @@ export default function App() {
       }
     };
     testConnection();
-  }, [isAuthReady, user]);
+  }, [isAuthReady, effectiveUserId]);
 
-  // Data Sync & Migration
+  // Data Sync & Migration (Firestore)
   useEffect(() => {
     if (!isAuthReady || !user) return;
 
     const syncData = async () => {
-      // Check for migration from localStorage
+      // Check for migration from localStorage (legacy or guest mode)
       const localSettings = localStorage.getItem('h2ls_settings');
       const localLogs = localStorage.getItem('h2ls_logs');
 
@@ -358,10 +393,10 @@ export default function App() {
             await batch.commit();
           }
         } catch (err) {
-          handleFirestoreError(err, OperationType.WRITE, `users/${user.uid}`);
+          console.error("Migration error:", err);
         }
         
-        // Clear local storage after migration attempt
+        // Clear local storage after migration attempt to avoid repeated attempts
         localStorage.removeItem('h2ls_settings');
         localStorage.removeItem('h2ls_logs');
       }
@@ -399,6 +434,27 @@ export default function App() {
     };
   }, [isAuthReady, user]);
 
+  // Local-only Fallback (when not logged in to Firebase)
+  useEffect(() => {
+    if (!isAuthReady || user) return;
+
+    const localSettings = localStorage.getItem('h2ls_settings');
+    const localLogs = localStorage.getItem('h2ls_logs');
+
+    if (localSettings) setSettings(JSON.parse(localSettings));
+    if (localLogs) setLogs(JSON.parse(localLogs));
+    
+    if (!localSettings) setActiveTab('settings');
+  }, [isAuthReady, user]);
+
+  // Persist to localStorage when in local-only mode
+  useEffect(() => {
+    if (!isAuthReady || user) return;
+    
+    if (settings) localStorage.setItem('h2ls_settings', JSON.stringify(settings));
+    if (logs.length > 0) localStorage.setItem('h2ls_logs', JSON.stringify(logs));
+  }, [settings, logs, isAuthReady, user]);
+
   const todayLogs = useMemo(() => {
     const today = format(new Date(), 'yyyy-MM-dd');
     return logs.filter(log => log.date === today);
@@ -414,36 +470,41 @@ export default function App() {
   }, [todayTotal, settings]);
 
   const addWater = async (amount: number) => {
-    if (!user) return;
     const now = new Date();
     const id = uuidv4();
-    const path = `users/${user.uid}/logs/${id}`;
-    try {
-      await setDoc(doc(db, 'users', user.uid, 'logs', id), {
-        id,
-        amount,
-        timestamp: now.toISOString(),
-        date: format(now, 'yyyy-MM-dd')
-      });
-    } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, path);
+    const newLog: WaterLog = {
+      id,
+      amount,
+      timestamp: now.toISOString(),
+      date: format(now, 'yyyy-MM-dd')
+    };
+
+    if (user) {
+      const path = `users/${user.uid}/logs/${id}`;
+      try {
+        await setDoc(doc(db, 'users', user.uid, 'logs', id), newLog);
+      } catch (err) {
+        handleFirestoreError(err, OperationType.WRITE, path);
+      }
+    } else {
+      setLogs(prev => [newLog, ...prev]);
     }
   };
 
   const deleteLog = async (id: string) => {
-    if (!user) return;
-    const path = `users/${user.uid}/logs/${id}`;
-    try {
-      await deleteDoc(doc(db, 'users', user.uid, 'logs', id));
-    } catch (err) {
-      handleFirestoreError(err, OperationType.DELETE, path);
+    if (user) {
+      const path = `users/${user.uid}/logs/${id}`;
+      try {
+        await deleteDoc(doc(db, 'users', user.uid, 'logs', id));
+      } catch (err) {
+        handleFirestoreError(err, OperationType.DELETE, path);
+      }
+    } else {
+      setLogs(prev => prev.filter(log => log.id !== id));
     }
   };
 
   const updateSettings = async (weight: number, level: number, manualGoal?: number, navigate = false) => {
-    if (!user) return;
-    const path = `users/${user.uid}`;
-    
     let goal = manualGoal;
     if (!goal) {
       const multiplier = level === 1 ? 35 : level === 2 ? 40 : 45;
@@ -457,11 +518,17 @@ export default function App() {
       updatedAt: new Date().toISOString()
     };
     
-    try {
-      await setDoc(doc(db, 'users', user.uid), newSettings);
+    if (user) {
+      const path = `users/${user.uid}`;
+      try {
+        await setDoc(doc(db, 'users', user.uid), newSettings);
+        if (navigate) setActiveTab('dashboard');
+      } catch (err) {
+        handleFirestoreError(err, OperationType.WRITE, path);
+      }
+    } else {
+      setSettings(newSettings);
       if (navigate) setActiveTab('dashboard');
-    } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, path);
     }
   };
 
@@ -540,36 +607,6 @@ export default function App() {
           className="text-blue-500"
         >
           <Droplets size={64} />
-        </motion.div>
-      </div>
-    );
-  }
-
-  if (!user) {
-    return (
-      <div className="min-h-screen bg-slate-950 flex items-center justify-center p-6">
-        <motion.div 
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-[2.5rem] p-10 text-center space-y-8"
-        >
-          <div className="bg-blue-500/10 w-20 h-20 rounded-3xl flex items-center justify-center mx-auto">
-            <Droplets size={40} className="text-blue-500" />
-          </div>
-          <div className="space-y-2">
-            <h1 className="text-3xl font-black text-white tracking-tighter">H2LS</h1>
-            <p className="text-slate-400 text-sm">Hidrate-se com inteligência e acompanhe seu progresso.</p>
-          </div>
-          <button 
-            onClick={login}
-            className="w-full py-4 bg-white text-slate-950 rounded-2xl font-black flex items-center justify-center gap-3 hover:bg-slate-200 transition-all"
-          >
-            <LogIn size={20} />
-            Entrar com Google
-          </button>
-          <p className="text-[10px] text-slate-600 uppercase font-bold tracking-widest">
-            Seus dados são salvos na nuvem com segurança
-          </p>
         </motion.div>
       </div>
     );
@@ -910,11 +947,11 @@ export default function App() {
                     <p className="text-slate-500 text-xs">Personalize sua meta diária</p>
                   </div>
                   <button 
-                    onClick={logout}
-                    className="p-2 bg-slate-900 border border-slate-800 rounded-xl text-slate-500 hover:text-rose-500 transition-colors"
-                    title="Sair"
+                    onClick={user && !user.isAnonymous ? logout : login}
+                    className="p-2 bg-slate-900 border border-slate-800 rounded-xl text-slate-500 hover:text-blue-500 transition-colors"
+                    title={user && !user.isAnonymous ? "Sair" : "Entrar com Google"}
                   >
-                    <LogIn size={18} className="rotate-180" />
+                    {user && !user.isAnonymous ? <LogIn size={18} className="rotate-180 text-rose-500" /> : <LogIn size={18} />}
                   </button>
                 </header>
 
