@@ -1,36 +1,38 @@
 {
   "entities": {
-    "userSettings": {
+    "UserSettings": {
       "title": "User Settings",
-      "description": "Stores user physical data and hydration goals",
+      "description": "User hydration settings and goals",
       "type": "object",
       "properties": {
-        "weight": { "type": "number", "description": "User weight in kg" },
-        "dailyGoal": { "type": "number", "description": "Calculated daily goal in ml" },
+        "weight": { "type": "number" },
+        "dailyGoal": { "type": "number" },
+        "hydrationLevel": { "type": "number" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["weight", "dailyGoal"]
+      "required": ["weight", "dailyGoal", "hydrationLevel", "updatedAt"]
     },
-    "waterLog": {
+    "WaterLog": {
       "title": "Water Log",
       "description": "A single entry of water consumption",
       "type": "object",
       "properties": {
-        "amount": { "type": "number", "description": "Amount in ml" },
+        "id": { "type": "string" },
+        "amount": { "type": "number" },
         "timestamp": { "type": "string", "format": "date-time" },
-        "date": { "type": "string", "description": "YYYY-MM-DD format for easy querying" }
+        "date": { "type": "string" }
       },
-      "required": ["amount", "timestamp", "date"]
+      "required": ["id", "amount", "timestamp", "date"]
     }
   },
   "firestore": {
-    "users/{userId}": {
-      "schema": "userSettings",
-      "description": "User specific settings"
+    "/users/{userId}": {
+      "schema": "UserSettings",
+      "description": "User settings document"
     },
-    "users/{userId}/logs/{logId}": {
-      "schema": "waterLog",
-      "description": "Individual water intake logs for a user"
+    "/users/{userId}/logs/{logId}": {
+      "schema": "WaterLog",
+      "description": "Individual water consumption logs"
     }
   }
 }

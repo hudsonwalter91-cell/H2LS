@@ -1,11 +1,29 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-
     // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Document ID: {userId} (matches auth.uid)
+    // Fields:
+    //   - weight: number (required)
+    //   - dailyGoal: number (required)
+    //   - hydrationLevel: number (required)
+    //   - updatedAt: string (ISO date)
+    //
+    // Collection: users/{userId}/logs
+    // Document ID: {logId}
+    // Fields:
+    //   - id: string (required)
+    //   - amount: number (required)
+    //   - timestamp: string (ISO date)
+    //   - date: string (YYYY-MM-DD)
+    //
+    // ===============================================================
+
     // Helper Functions
-    // ===============================================================
-
     function isAuthenticated() {
       return request.auth != null;
     }
@@ -14,44 +32,37 @@ service cloud.firestore {
       return isAuthenticated() && request.auth.uid == userId;
     }
 
-    function hasRequiredFields(fields) {
-      return request.resource.data.keys().hasAll(fields);
-    }
-
-    function hasOnlyAllowedFields(fields) {
-      return request.resource.data.keys().hasOnly(fields);
-    }
-
-    // ===============================================================
-    // Domain Validators
-    // ===============================================================
-
     function isValidUserSettings(data) {
-      return hasRequiredFields(['weight', 'dailyGoal']) &&
-             data.weight is number && data.weight > 0 && data.weight < 500 &&
-             data.dailyGoal is number && data.dailyGoal > 0 && data.dailyGoal < 20000;
+      return data.keys().hasAll(['weight', 'dailyGoal', 'hydrationLevel', 'updatedAt']) &&
+             data.weight is number && data.weight > 0 &&
+             data.dailyGoal is number && data.dailyGoal > 0 &&
+             data.hydrationLevel is number && data.hydrationLevel >= 1 && data.hydrationLevel <= 3 &&
+             data.updatedAt is string;
     }
 
     function isValidWaterLog(data) {
-      return hasRequiredFields(['amount', 'timestamp', 'date']) &&
-             data.amount is number && data.amount > 0 && data.amount < 5000 &&
+      return data.keys().hasAll(['id', 'amount', 'timestamp', 'date']) &&
+             data.id is string &&
+             data.amount is number && data.amount > 0 &&
              data.timestamp is string &&
-             data.date is string && data.date.matches("^\\d{4}-\\d{2}-\\d{2}$");
+             data.date is string;
     }
 
-    // ===============================================================
     // Rules
-    // ===============================================================
-
     match /users/{userId} {
       allow read: if isOwner(userId);
       allow create, update: if isOwner(userId) && isValidUserSettings(request.resource.data);
-
+      
       match /logs/{logId} {
         allow read: if isOwner(userId);
-        allow create: if isOwner(userId) && isValidWaterLog(request.resource.data);
+        allow create, update: if isOwner(userId) && isValidWaterLog(request.resource.data);
         allow delete: if isOwner(userId);
       }
+    }
+
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
     }
   }
 }

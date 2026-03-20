@@ -1,9 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { 
   onAuthStateChanged, 
-  signInAnonymously, 
-  signInWithPopup,
-  GoogleAuthProvider,
+  signInAnonymously,
   User 
 } from 'firebase/auth';
 import { 
@@ -15,8 +13,8 @@ import {
   orderBy, 
   addDoc,
   deleteDoc,
-  Timestamp,
-  getDocFromServer
+  getDoc,
+  writeBatch
 } from 'firebase/firestore';
 import { auth, db } from './firebase';
 import { 
@@ -35,7 +33,7 @@ import {
   TrendingUp,
   Award
 } from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion, AnimatePresence } from 'motion/react';
 import { 
   LineChart, 
   Line, 
@@ -51,6 +49,7 @@ import { format, startOfDay, subDays, isSameDay, parseISO } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
+import { v4 as uuidv4 } from 'uuid';
 
 // --- Utility ---
 function cn(...inputs: ClassValue[]) {
@@ -134,15 +133,9 @@ const QuickAddButton = ({ amount, onClick }: { amount: number; onClick: (val: nu
 
 const ErrorBoundary = ({ children }: { children: React.ReactNode }) => {
   const [hasError, setHasError] = useState(false);
-  const [errorInfo, setErrorInfo] = useState<string | null>(null);
 
   useEffect(() => {
-    const handleError = (event: ErrorEvent) => {
-      if (event.error?.message && event.error.message.startsWith('{')) {
-        setHasError(true);
-        setErrorInfo(event.error.message);
-      }
-    };
+    const handleError = () => setHasError(true);
     window.addEventListener('error', handleError);
     return () => window.removeEventListener('error', handleError);
   }, []);
@@ -154,16 +147,16 @@ const ErrorBoundary = ({ children }: { children: React.ReactNode }) => {
           <AlertCircle className="w-12 h-12 text-red-500 mx-auto mb-4" />
           <h2 className="text-xl font-bold text-white mb-2">Ops! Algo deu errado</h2>
           <p className="text-slate-400 text-sm mb-6">
-            Ocorreu um erro de permissão ou conexão com o banco de dados.
+            Ocorreu um erro inesperado no aplicativo.
           </p>
-          <pre className="text-[10px] text-left bg-black/50 p-4 rounded-xl overflow-auto max-h-48 text-red-400 mb-6">
-            {errorInfo}
-          </pre>
           <button 
-            onClick={() => window.location.reload()}
+            onClick={() => {
+              localStorage.clear();
+              window.location.reload();
+            }}
             className="w-full py-3 bg-blue-600 text-white rounded-xl font-semibold"
           >
-            Recarregar Aplicativo
+            Limpar Dados e Reiniciar
           </button>
         </div>
       </div>
@@ -181,64 +174,72 @@ export default function App() {
   const [logs, setLogs] = useState<WaterLog[]>([]);
   const [activeTab, setActiveTab] = useState<'dashboard' | 'history' | 'settings'>('dashboard');
   const [isAuthReady, setIsAuthReady] = useState(false);
-  const [authError, setAuthError] = useState<string | null>(null);
   const [customAmount, setCustomAmount] = useState('');
   const [showCustomInput, setShowCustomInput] = useState(false);
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
 
-  const loginWithGoogle = async () => {
-    const provider = new GoogleAuthProvider();
-    try {
-      await signInWithPopup(auth, provider);
-      setAuthError(null);
-    } catch (err) {
-      console.error("Google login error:", err);
-    }
-  };
-
-  // Auth & Connection Test
+  // Auth & Anonymous Login
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       if (!currentUser) {
         try {
           await signInAnonymously(auth);
-          setAuthError(null);
-        } catch (err: any) {
+        } catch (err) {
           console.error("Auth error:", err);
-          if (err.code === 'auth/admin-restricted-operation') {
-            setAuthError('anonymous_disabled');
-          } else {
-            setAuthError('general_error');
-          }
         }
       } else {
         setUser(currentUser);
         setIsAuthReady(true);
-        setAuthError(null);
-        // Test connection
-        try {
-          await getDocFromServer(doc(db, 'test', 'connection'));
-        } catch (e) {
-          // Silent fail for connection test as per guidelines
-        }
       }
     });
     return unsubscribe;
   }, []);
 
-  // Data Sync
+  // Data Sync & Migration
   useEffect(() => {
     if (!isAuthReady || !user) return;
+
+    const syncData = async () => {
+      // Check for migration from localStorage
+      const localSettings = localStorage.getItem('h2ls_settings');
+      const localLogs = localStorage.getItem('h2ls_logs');
+
+      if (localSettings || localLogs) {
+        const userDoc = await getDoc(doc(db, 'users', user.uid));
+        
+        // Only migrate if Firestore is empty
+        if (!userDoc.exists()) {
+          const batch = writeBatch(db);
+          
+          if (localSettings) {
+            batch.set(doc(db, 'users', user.uid), JSON.parse(localSettings));
+          }
+          
+          if (localLogs) {
+            const parsedLogs = JSON.parse(localLogs) as WaterLog[];
+            parsedLogs.forEach(log => {
+              const logRef = doc(collection(db, 'users', user.uid, 'logs'), log.id);
+              batch.set(logRef, log);
+            });
+          }
+          
+          await batch.commit();
+        }
+        
+        // Clear local storage after migration attempt
+        localStorage.removeItem('h2ls_settings');
+        localStorage.removeItem('h2ls_logs');
+      }
+    };
+
+    syncData();
 
     const settingsUnsubscribe = onSnapshot(doc(db, 'users', user.uid), (snapshot) => {
       if (snapshot.exists()) {
         setSettings(snapshot.data() as UserSettings);
       } else {
-        // Default settings if none exist
         setActiveTab('settings');
       }
-    }, (error) => {
-      console.error("Settings error:", error);
     });
 
     const logsQuery = query(
@@ -251,8 +252,6 @@ export default function App() {
         ...doc.data()
       })) as WaterLog[];
       setLogs(newLogs);
-    }, (error) => {
-      console.error("Logs error:", error);
     });
 
     return () => {
@@ -278,8 +277,10 @@ export default function App() {
   const addWater = async (amount: number) => {
     if (!user) return;
     const now = new Date();
+    const id = uuidv4();
     try {
-      await addDoc(collection(db, 'users', user.uid, 'logs'), {
+      await setDoc(doc(db, 'users', user.uid, 'logs', id), {
+        id,
         amount,
         timestamp: now.toISOString(),
         date: format(now, 'yyyy-MM-dd')
@@ -298,7 +299,7 @@ export default function App() {
     }
   };
 
-  const updateSettings = async (weight: number, level: number, manualGoal?: number) => {
+  const updateSettings = async (weight: number, level: number, manualGoal?: number, navigate = false) => {
     if (!user) return;
     
     let goal = manualGoal;
@@ -307,14 +308,16 @@ export default function App() {
       goal = weight * multiplier;
     }
 
+    const newSettings: UserSettings = {
+      weight,
+      hydrationLevel: level,
+      dailyGoal: goal,
+      updatedAt: new Date().toISOString()
+    };
+    
     try {
-      await setDoc(doc(db, 'users', user.uid), {
-        weight,
-        hydrationLevel: level,
-        dailyGoal: goal,
-        updatedAt: new Date().toISOString()
-      });
-      setActiveTab('dashboard');
+      await setDoc(doc(db, 'users', user.uid), newSettings);
+      if (navigate) setActiveTab('dashboard');
     } catch (err) {
       console.error("Error updating settings:", err);
     }
@@ -385,32 +388,6 @@ export default function App() {
     if (progress >= 50) return "Bom progresso! Você está na metade do caminho. 🚀";
     return "Beba um pouco de água agora! Seu corpo precisa. 💧";
   }, [progress]);
-
-  if (authError === 'anonymous_disabled') {
-    return (
-      <div className="min-h-screen bg-slate-950 flex items-center justify-center p-6 text-center">
-        <div className="bg-slate-900 border border-blue-500/30 p-8 rounded-3xl max-w-md">
-          <AlertCircle className="w-12 h-12 text-blue-500 mx-auto mb-4" />
-          <h2 className="text-xl font-bold text-white mb-2">Configuração Necessária</h2>
-          <p className="text-slate-400 text-sm mb-6">
-            O login anônimo precisa ser ativado no Console do Firebase para identificação automática do dispositivo.
-          </p>
-          <div className="space-y-3">
-            <button 
-              onClick={loginWithGoogle}
-              className="w-full py-3 bg-white text-black rounded-xl font-bold flex items-center justify-center gap-2"
-            >
-              <LogIn size={18} />
-              Entrar com Google
-            </button>
-            <p className="text-[10px] text-slate-500">
-              Ou ative "Anonymous Auth" no Firebase Console para usar sem login.
-            </p>
-          </div>
-        </div>
-      </div>
-    );
-  }
 
   if (!isAuthReady) {
     return (
@@ -786,6 +763,13 @@ export default function App() {
                       <span className="text-sm font-bold text-slate-500 mb-1">Litros / dia</span>
                     </div>
                   </div>
+
+                  <button 
+                    onClick={() => setActiveTab('dashboard')}
+                    className="w-full py-4 rounded-2xl bg-blue-600 hover:bg-blue-500 text-white font-bold transition-all shadow-lg shadow-blue-900/20"
+                  >
+                    Confirmar e Ir para Início
+                  </button>
                 </div>
               </motion.div>
             )}
